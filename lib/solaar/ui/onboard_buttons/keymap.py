@@ -83,6 +83,67 @@ _HID_NAME_TO_CODE: dict[str, int] = {str(k): int(k) for k in special_keys.USB_HI
 # matter (back/forward, volume, play/pause, ...).
 _LAST_STANDARD_KEYBOARD_USAGE = 0xE7
 
+# Named keys within the standard range that still don't belong in the
+# picker: Japanese/Korean IME and layout-specific keys (essentially never
+# useful on a mouse button, and confusing clutter for anyone else); legacy
+# "phantom" application keys that essentially no physical keyboard
+# implements and that Consumer-Control's AC_* keys already cover more
+# portably; the keyboard-page volume/mute keys, now redundant with their
+# Consumer-Control equivalents above (which is the more common way these
+# are actually implemented); and ordinary punctuation, which is rarely what
+# anyone wants a mouse button to type and was crowding out the keys people
+# actually reach for.
+_EXCLUDED_KEY_NAMES = frozenset(
+    {
+        # Japanese / Korean IME and layout-specific keys
+        "102ND",
+        "HANGEUL",
+        "HANJA",
+        "HIRAGANA",
+        "HENKAN",
+        "KATAKANA",
+        "KATAKANAHIRAGANA",
+        "MUHENKAN",
+        "RO",
+        "YEN",
+        "ZENKAKUHANKAKU",
+        "KPJPCOMMA",
+        # Legacy "phantom" application keys
+        "AGAIN",
+        "COPY",
+        "CUT",
+        "PASTE",
+        "UNDO",
+        "FIND",
+        "HELP",
+        "OPEN",
+        "PROPS",
+        "FRONT",
+        "STOP",
+        "POWER",
+        "COMPOSE",
+        "SYSRQ",
+        "No Output",
+        # Keyboard-page volume/mute (see Consumer-Control group instead)
+        "MUTE",
+        "VOLUMEUP",
+        "VOLUMEDOWN",
+        # Ordinary punctuation
+        "GRAVE",
+        "MINUS",
+        "EQUAL",
+        "SEMICOLON",
+        "APOSTROPHE",
+        "COMMA",
+        "DOT",
+        "SLASH",
+        "BACKSLASH",
+        "LEFTBRACE",
+        "RIGHTBRACE",
+        "HASHTILDE",
+    }
+)
+
 # A hand-picked subset of HID_CONSUMERCODES worth offering in the picker --
 # that table has ~330 entries (mostly obscure "Application Control" commands
 # like AC_Distribute_Horizontally) and dumping all of them in would bury the
@@ -344,18 +405,23 @@ def available_keys() -> list[tuple[str, int, str]]:
 
     The keyboard-key group merges Solaar's named USB_HID_KEYCODES table
     (excluding the non-standard "MEDIA_*" block -- see
-    _LAST_STANDARD_KEYBOARD_USAGE above) with the top-row digit codes 3-9
-    and 0, which that table leaves unnamed (only "1" and "2" are named
-    upstream -- see _DIGIT_HID_CODE above); everything else capture can
-    reach (letters, F-keys, numpad, navigation, ...) is already named there
-    and needs no patching in. It's grouped for readability rather than
-    sorted alphabetically (see _sort_group), then the curated
-    Consumer-Control keys are appended as their own trailing group.
+    _LAST_STANDARD_KEYBOARD_USAGE -- and the IME/legacy/punctuation clutter
+    in _EXCLUDED_KEY_NAMES) with the top-row digit codes 3-9 and 0, which
+    that table leaves unnamed (only "1" and "2" are named upstream -- see
+    _DIGIT_HID_CODE above); everything else capture can reach (letters,
+    F-keys, numpad, navigation, ...) is already named there and needs no
+    patching in. It's grouped for readability rather than sorted
+    alphabetically (see _sort_group), then the curated Consumer-Control
+    keys are appended as their own trailing group.
     """
     combined = dict(_HID_NAME_TO_CODE)
     for _digit, _code in _DIGIT_HID_CODE.items():
         combined.setdefault(_digit, _code)
-    combined = {name: code for name, code in combined.items() if code <= _LAST_STANDARD_KEYBOARD_USAGE}
+    combined = {
+        name: code
+        for name, code in combined.items()
+        if code <= _LAST_STANDARD_KEYBOARD_USAGE and name not in _EXCLUDED_KEY_NAMES
+    }
     keys = [(name, code, "key") for name, code in sorted(combined.items(), key=_sort_group)]
     consumer = [
         (label, int(special_keys.HID_CONSUMERCODES[attr]), "consumer") for label, attr in _CURATED_CONSUMER_KEYS.items()
