@@ -215,8 +215,48 @@ def manual_button(hid_code: int, modifiers: int = 0) -> hidpp20.Button:
     )
 
 
+# Standalone modifier keys, in the order the picker should list them (Ctrl,
+# then Shift, then Alt, then the Windows/Meta key -- left before right within
+# each pair). USB_HID_KEYCODES spells the Windows key two different ways
+# depending on side (LEFTWINDOWS / RIGHTMETA) -- both are listed here as-is.
+_MODIFIER_KEY_ORDER = (
+    "LEFTCTRL",
+    "RIGHTCTRL",
+    "LEFTSHIFT",
+    "RIGHTSHIFT",
+    "LEFTALT",
+    "RIGHTALT",
+    "LEFTWINDOWS",
+    "RIGHTMETA",
+)
+
+# The top-row digits in the order people actually read them off a keyboard
+# (1,2,...,9,0), used to group and order _DIGIT_HID_CODE entries below.
+_DIGIT_ORDER = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+
+
+def _sort_group(item: tuple[str, int]) -> tuple[int, object]:
+    """Grouping key for available_keys(): letters, then top-row digits, then
+    the numpad digits, then the standalone modifier keys, then F-keys, then
+    everything else (navigation, editing, media, ...) alphabetically -- the
+    order the user asked for rather than a plain alphabetical dump."""
+    name, _hid_code = item
+    if len(name) == 1 and name.isalpha():
+        return (0, name)
+    if name in _DIGIT_ORDER:
+        return (1, _DIGIT_ORDER.index(name))
+    if name.startswith("KP") and name[2:].isdigit():
+        return (2, int(name[2:]))
+    if name in _MODIFIER_KEY_ORDER:
+        return (3, _MODIFIER_KEY_ORDER.index(name))
+    if name.startswith("F") and name[1:].isdigit():
+        return (4, int(name[1:]))
+    return (5, name)
+
+
 def available_keys() -> list[tuple[str, int]]:
-    """(name, HID code) pairs the manual picker can offer, sorted by name.
+    """(name, HID code) pairs the manual picker can offer, grouped for
+    readability rather than sorted alphabetically (see _sort_group).
 
     Merges Solaar's named USB_HID_KEYCODES table with the top-row digit
     codes 3-9 and 0, which that table leaves unnamed (only "1" and "2" are
@@ -227,7 +267,7 @@ def available_keys() -> list[tuple[str, int]]:
     combined = dict(_HID_NAME_TO_CODE)
     for _digit, _code in _DIGIT_HID_CODE.items():
         combined.setdefault(_digit, _code)
-    return sorted(combined.items())
+    return sorted(combined.items(), key=_sort_group)
 
 
 def unassigned_button() -> hidpp20.Button:

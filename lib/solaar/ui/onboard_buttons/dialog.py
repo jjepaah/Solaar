@@ -63,6 +63,7 @@ class GtkSignal(Enum):
     DELETE_EVENT = "delete-event"
     CLICKED = "clicked"
     KEY_PRESS_EVENT = "key-press-event"
+    ROW_ACTIVATED = "row-activated"
 
 
 _dialogs: dict[Hashable, "OnboardButtonsDialog"] = {}
@@ -112,21 +113,52 @@ class _KeyPickerDialog(Gtk.Dialog):
     separately via checkboxes instead of read off the live event state.
     """
 
+    # Row height GTK gives a plain (non-headers) Gtk.TreeView, in pixels --
+    # used to size the scroller to a fixed number of visible rows rather
+    # than letting it size to fit every row (which is what made the old
+    # Gtk.ComboBoxText popup span the whole monitor for a ~100-entry list).
+    _ROW_HEIGHT_PX = 26
+    _VISIBLE_ROWS = 9
+
     def __init__(self, parent: Gtk.Window, current_hid_code: int | None, current_modifiers: int) -> None:
         super().__init__(title=_("Choose a Key"), transient_for=parent, modal=True)
         self.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("OK"), Gtk.ResponseType.OK)
-        self.set_default_size(280, -1)
+        self.set_default_size(280, 360)
 
         box = self.get_content_area()
         box.set_spacing(6)
         box.set_border_width(8)
 
-        self._combo = Gtk.ComboBoxText()
+        # A plain ComboBoxText's popup has no built-in max-height, so with
+        # ~100 entries it opened spanning the full screen. A Gtk.TreeView
+        # embedded directly in the dialog (in a height-capped, scrollable
+        # window) behaves like an ordinary bounded dropdown list instead.
+        self._store = Gtk.ListStore(str, int)  # display name, HID code
+        selected_iter = None
         for name, hid_code in keymap.available_keys():
-            self._combo.append(str(hid_code), name)
-        if current_hid_code is None or not self._combo.set_active_id(str(current_hid_code)):
-            self._combo.set_active(0)
-        box.pack_start(self._combo, False, False, 0)
+            row_iter = self._store.append([name, hid_code])
+            if current_hid_code is not None and hid_code == current_hid_code:
+                selected_iter = row_iter
+
+        self._view = Gtk.TreeView(model=self._store)
+        self._view.set_headers_visible(False)
+        column = Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0)
+        self._view.append_column(column)
+        self._view.connect(GtkSignal.ROW_ACTIVATED.value, self._on_row_activated)
+
+        self._selection = self._view.get_selection()
+        self._selection.set_mode(Gtk.SelectionMode.BROWSE)
+        if selected_iter is None:
+            selected_iter = self._store.get_iter_first()
+        if selected_iter is not None:
+            self._selection.select_iter(selected_iter)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(self._ROW_HEIGHT_PX * self._VISIBLE_ROWS)
+        scroller.set_max_content_height(self._ROW_HEIGHT_PX * self._VISIBLE_ROWS)
+        scroller.add(self._view)
+        box.pack_start(scroller, True, True, 0)
 
         mod_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self._ctrl = Gtk.CheckButton(label=_("Ctrl"))
@@ -142,12 +174,22 @@ class _KeyPickerDialog(Gtk.Dialog):
         box.pack_start(mod_box, False, False, 0)
 
         self.show_all()
+        if selected_iter is not None:
+            path = self._store.get_path(selected_iter)
+            # Center the current selection in the scroller instead of always
+            # opening on row 0 -- most useful when re-editing an existing key.
+            self._view.scroll_to_cell(path, None, True, 0.5, 0.0)
+
+    def _on_row_activated(self, _view, _path, _column) -> None:
+        # Double-clicking a row is the same as picking it and pressing OK.
+        self.response(Gtk.ResponseType.OK)
 
     def result(self) -> tuple[int, int] | None:
         """The chosen (hid_code, modifiers), or None if nothing is selected."""
-        hid_code_str = self._combo.get_active_id()
-        if hid_code_str is None:
+        _model, row_iter = self._selection.get_selected()
+        if row_iter is None:
             return None
+        hid_code = self._store.get_value(row_iter, 1)
         modifiers = 0
         if self._ctrl.get_active():
             modifiers |= 0x01
@@ -157,7 +199,7 @@ class _KeyPickerDialog(Gtk.Dialog):
             modifiers |= 0x04
         if self._meta.get_active():
             modifiers |= 0x08
-        return int(hid_code_str), modifiers
+        return int(hid_code), modifiers
 
 
 class OnboardButtonsDialog:
