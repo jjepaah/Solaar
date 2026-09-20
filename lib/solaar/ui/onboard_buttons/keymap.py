@@ -38,6 +38,21 @@ one:
   can't physically send (the numpad on a keyboard with no numpad block is
   the case that motivated this: capture cannot solve that, no matter how
   complete the keyval table is, so a name-based picker is the only way in).
+
+The same list also offers a curated set of Consumer-Control keys (browser
+back/forward, volume, play/pause, ...) via ``manual_consumer_button()``.
+These are a genuinely different Button wire type (behavior SEND, type
+CONSUMER_KEY, a 2-byte usage code with no modifiers byte -- see
+``hidpp20.Button.to_bytes``), not a keyboard key at all. USB_HID_KEYCODES
+does contain a set of "MEDIA_*" entries (MEDIA_BACK, MEDIA_VOLUMEUP, ...)
+at codes 0xE8 and up, but those are officially-reserved slots on the real
+Keyboard/Keypad usage page (which Solaar's own docs use 0x00-0xE7 for) that
+Linux's HID driver happens to special-case for some vendor keyboards --
+sending them as a plain MODIFIER_AND_KEY value byte is not part of the USB
+HID spec and many systems and compositors don't recognize it (this is why
+Browser Back/Forward chosen from an earlier version of this picker did
+nothing). The curated list below offers the real Consumer-Control
+equivalents instead, which is the standard, portable way to send these.
 """
 
 from __future__ import annotations
@@ -57,6 +72,54 @@ from solaar.i18n import _  # NOQA: E402
 _KEYVAL_TO_HID: dict[int, int] = {}
 
 _HID_NAME_TO_CODE: dict[str, int] = {str(k): int(k) for k in special_keys.USB_HID_KEYCODES}
+
+# The real USB HID Keyboard/Keypad usage page ends at 0xE7 (Right GUI/Meta).
+# special_keys.USB_HID_KEYCODES also carries a "MEDIA_*" block above that
+# (0xE8-0xFB: MEDIA_BACK, MEDIA_VOLUMEUP, ...) which reuses officially-
+# reserved usage IDs for vendor multimedia keys -- not part of the spec, and
+# not reliably recognized as a MODIFIER_AND_KEY value byte (see module
+# docstring). Exclude that range from the keyboard-key list; the curated
+# Consumer-Control list below offers a working equivalent for the ones that
+# matter (back/forward, volume, play/pause, ...).
+_LAST_STANDARD_KEYBOARD_USAGE = 0xE7
+
+# A hand-picked subset of HID_CONSUMERCODES worth offering in the picker --
+# that table has ~330 entries (mostly obscure "Application Control" commands
+# like AC_Distribute_Horizontally) and dumping all of them in would bury the
+# keys people actually want. Each maps a friendly label to its
+# special_keys.HID_CONSUMERCODES attribute name -- NamedInts supports
+# indexing by that attribute-style name directly (special_keys.
+# HID_CONSUMERCODES["AC_Back"]), which is a different, underscored spelling
+# from str(the NamedInt) ("AC Back") used for display and for _HID_NAME_TO_
+# CODE above. Order is deliberate (browser keys, then media transport, then
+# misc) rather than alphabetical, since this list is short enough to just
+# read top to bottom.
+_CURATED_CONSUMER_KEYS: dict[str, str] = {
+    "Browser Back": "AC_Back",
+    "Browser Forward": "AC_Forward",
+    "Browser Refresh": "AC_Refresh",
+    "Browser Stop": "AC_Stop",
+    "Browser Home": "AC_Home",
+    "Browser Search": "AC_Find",
+    "Launch Browser": "AL_Internet_Browser",
+    "Launch Calculator": "AL_Calculator",
+    "Play/Pause": "Play__Pause",
+    "Stop": "Stop",
+    "Previous Track": "Scan_Previous_Track",
+    "Next Track": "Scan_Next_Track",
+    "Eject": "Eject",
+    "Volume Up": "Volume_Up",
+    "Volume Down": "Volume_Down",
+    "Mute": "Mute",
+    "Sleep": "Sleep",
+    "Lock Screen": "AL_Terminal_Lock__Screensaver",
+    "Scroll Up": "AC_Scroll_Up",
+    "Scroll Down": "AC_Scroll_Down",
+}
+
+_CONSUMER_CODE_TO_LABEL: dict[int, str] = {
+    int(special_keys.HID_CONSUMERCODES[attr]): label for label, attr in _CURATED_CONSUMER_KEYS.items()
+}
 
 
 def _map_name(gdk_attr: str, hid_name: str) -> None:
@@ -215,6 +278,22 @@ def manual_button(hid_code: int, modifiers: int = 0) -> hidpp20.Button:
     )
 
 
+def manual_consumer_button(usage_code: int) -> hidpp20.Button:
+    """Build the onboard-profile Button entry for a Consumer-Control key
+    chosen from the list (browser back/forward, volume, play/pause, ...).
+
+    A different wire shape from manual_button(): SEND / CONSUMER_KEY, a
+    2-byte usage code with no modifiers byte at all (see
+    hidpp20.Button.to_bytes) -- "Ctrl+Volume Up" isn't a thing this Button
+    type can express, unlike a keyboard key.
+    """
+    return hidpp20.Button(
+        behavior=int(hidpp20.ButtonBehavior.SEND),
+        type=int(hidpp20.ButtonMappingType.CONSUMER_KEY),
+        value=usage_code,
+    )
+
+
 # Standalone modifier keys, in the order the picker should list them (Ctrl,
 # then Shift, then Alt, then the Windows/Meta key -- left before right within
 # each pair). USB_HID_KEYCODES spells the Windows key two different ways
@@ -254,20 +333,34 @@ def _sort_group(item: tuple[str, int]) -> tuple[int, object]:
     return (5, name)
 
 
-def available_keys() -> list[tuple[str, int]]:
-    """(name, HID code) pairs the manual picker can offer, grouped for
-    readability rather than sorted alphabetically (see _sort_group).
+def available_keys() -> list[tuple[str, int, str]]:
+    """(display name, code, kind) triples the manual picker can offer.
 
-    Merges Solaar's named USB_HID_KEYCODES table with the top-row digit
-    codes 3-9 and 0, which that table leaves unnamed (only "1" and "2" are
-    named upstream -- see _DIGIT_HID_CODE above); everything else capture
-    can reach (letters, F-keys, numpad, navigation, ...) is already named
-    there and needs no patching in.
+    ``kind`` is ``"key"`` for a keyboard usage code -- build its Button with
+    manual_button() -- or ``"consumer"`` for a Consumer-Control usage code
+    -- build its Button with manual_consumer_button() instead, since it's a
+    different wire shape (see that function's docstring). The two are never
+    the same code space, so a caller can't mix them up by accident.
+
+    The keyboard-key group merges Solaar's named USB_HID_KEYCODES table
+    (excluding the non-standard "MEDIA_*" block -- see
+    _LAST_STANDARD_KEYBOARD_USAGE above) with the top-row digit codes 3-9
+    and 0, which that table leaves unnamed (only "1" and "2" are named
+    upstream -- see _DIGIT_HID_CODE above); everything else capture can
+    reach (letters, F-keys, numpad, navigation, ...) is already named there
+    and needs no patching in. It's grouped for readability rather than
+    sorted alphabetically (see _sort_group), then the curated
+    Consumer-Control keys are appended as their own trailing group.
     """
     combined = dict(_HID_NAME_TO_CODE)
     for _digit, _code in _DIGIT_HID_CODE.items():
         combined.setdefault(_digit, _code)
-    return sorted(combined.items(), key=_sort_group)
+    combined = {name: code for name, code in combined.items() if code <= _LAST_STANDARD_KEYBOARD_USAGE}
+    keys = [(name, code, "key") for name, code in sorted(combined.items(), key=_sort_group)]
+    consumer = [
+        (label, int(special_keys.HID_CONSUMERCODES[attr]), "consumer") for label, attr in _CURATED_CONSUMER_KEYS.items()
+    ]
+    return keys + consumer
 
 
 def unassigned_button() -> hidpp20.Button:
@@ -291,6 +384,20 @@ def key_and_modifiers(button: hidpp20.Button | None) -> tuple[int | None, int]:
     return getattr(button, "value", None), getattr(button, "modifiers", 0) or 0
 
 
+def consumer_code(button: hidpp20.Button | None) -> int | None:
+    """The Consumer-Control usage code a Button holds, if it's a
+    Consumer-Control key mapping (see manual_consumer_button()) -- the
+    counterpart to key_and_modifiers() for this Button type, shared by
+    describe() and the dialog's "choose from a list" picker.
+    """
+    behavior = getattr(button, "behavior", None) if button is not None else None
+    if behavior != int(hidpp20.ButtonBehavior.SEND):
+        return None
+    if getattr(button, "type", None) != int(hidpp20.ButtonMappingType.CONSUMER_KEY):
+        return None
+    return getattr(button, "value", None)
+
+
 def describe(button: hidpp20.Button | None) -> str:
     """Human-readable summary of a button's current assignment, for its row label."""
     behavior = getattr(button, "behavior", None) if button is not None else None
@@ -303,6 +410,13 @@ def describe(button: hidpp20.Button | None) -> str:
         else:
             key_name = str(hid_code)
         return _format_display(key_name, modifiers)
-    # Mouse buttons, consumer keys, and device functions are out of scope for
-    # this editor (v1) -- show that something is set without offering to edit it.
+    usage_code = consumer_code(button)
+    if usage_code is not None:
+        if usage_code in _CONSUMER_CODE_TO_LABEL:
+            return _CONSUMER_CODE_TO_LABEL[usage_code]
+        if usage_code in special_keys.HID_CONSUMERCODES:
+            return str(special_keys.HID_CONSUMERCODES[usage_code])
+        return str(usage_code)
+    # Mouse buttons and device functions are out of scope for this editor
+    # (v1) -- show that something is set without offering to edit it.
     return _("(set via CLI -- not a plain key mapping)")

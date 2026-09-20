@@ -120,7 +120,13 @@ class _KeyPickerDialog(Gtk.Dialog):
     _ROW_HEIGHT_PX = 26
     _VISIBLE_ROWS = 9
 
-    def __init__(self, parent: Gtk.Window, current_hid_code: int | None, current_modifiers: int) -> None:
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        current_hid_code: int | None,
+        current_modifiers: int,
+        current_consumer_code: int | None = None,
+    ) -> None:
         super().__init__(title=_("Choose a Key"), transient_for=parent, modal=True)
         self.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("OK"), Gtk.ResponseType.OK)
         self.set_default_size(280, 360)
@@ -133,11 +139,13 @@ class _KeyPickerDialog(Gtk.Dialog):
         # ~100 entries it opened spanning the full screen. A Gtk.TreeView
         # embedded directly in the dialog (in a height-capped, scrollable
         # window) behaves like an ordinary bounded dropdown list instead.
-        self._store = Gtk.ListStore(str, int)  # display name, HID code
+        self._store = Gtk.ListStore(str, int, str)  # display name, code, kind ("key" / "consumer")
         selected_iter = None
-        for name, hid_code in keymap.available_keys():
-            row_iter = self._store.append([name, hid_code])
-            if current_hid_code is not None and hid_code == current_hid_code:
+        for name, code, kind in keymap.available_keys():
+            row_iter = self._store.append([name, code, kind])
+            if kind == "key" and current_hid_code is not None and code == current_hid_code:
+                selected_iter = row_iter
+            elif kind == "consumer" and current_consumer_code is not None and code == current_consumer_code:
                 selected_iter = row_iter
 
         self._view = Gtk.TreeView(model=self._store)
@@ -148,6 +156,7 @@ class _KeyPickerDialog(Gtk.Dialog):
 
         self._selection = self._view.get_selection()
         self._selection.set_mode(Gtk.SelectionMode.BROWSE)
+        self._selection.connect("changed", self._on_selection_changed)
         if selected_iter is None:
             selected_iter = self._store.get_iter_first()
         if selected_iter is not None:
@@ -160,7 +169,7 @@ class _KeyPickerDialog(Gtk.Dialog):
         scroller.add(self._view)
         box.pack_start(scroller, True, True, 0)
 
-        mod_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self._mod_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self._ctrl = Gtk.CheckButton(label=_("Ctrl"))
         self._shift = Gtk.CheckButton(label=_("Shift"))
         self._alt = Gtk.CheckButton(label=_("Alt"))
@@ -170,10 +179,11 @@ class _KeyPickerDialog(Gtk.Dialog):
         self._alt.set_active(bool(current_modifiers & 0x04))
         self._meta.set_active(bool(current_modifiers & 0x08))
         for check in (self._ctrl, self._shift, self._alt, self._meta):
-            mod_box.pack_start(check, False, False, 0)
-        box.pack_start(mod_box, False, False, 0)
+            self._mod_box.pack_start(check, False, False, 0)
+        box.pack_start(self._mod_box, False, False, 0)
 
         self.show_all()
+        self._on_selection_changed(self._selection)
         if selected_iter is not None:
             path = self._store.get_path(selected_iter)
             # Center the current selection in the scroller instead of always
@@ -184,22 +194,38 @@ class _KeyPickerDialog(Gtk.Dialog):
         # Double-clicking a row is the same as picking it and pressing OK.
         self.response(Gtk.ResponseType.OK)
 
-    def result(self) -> tuple[int, int] | None:
-        """The chosen (hid_code, modifiers), or None if nothing is selected."""
-        _model, row_iter = self._selection.get_selected()
+    def _on_selection_changed(self, selection: Gtk.TreeSelection) -> None:
+        # A Consumer-Control key (browser back, volume, ...) has no
+        # modifiers byte in its Button encoding -- see
+        # keymap.manual_consumer_button() -- so grey the checkboxes out
+        # rather than silently ignoring them once a key of that kind is
+        # picked.
+        model, row_iter = selection.get_selected()
+        is_key = row_iter is not None and model.get_value(row_iter, 2) == "key"
+        self._mod_box.set_sensitive(is_key)
+
+    def result(self) -> tuple[str, int, int] | None:
+        """(kind, code, modifiers) for the chosen row, or None if nothing is
+        selected. ``kind`` is "key" or "consumer" (see
+        keymap.available_keys()); modifiers is always 0 for a "consumer"
+        row, since that Button type carries no modifiers byte at all.
+        """
+        model, row_iter = self._selection.get_selected()
         if row_iter is None:
             return None
-        hid_code = self._store.get_value(row_iter, 1)
+        code = model.get_value(row_iter, 1)
+        kind = model.get_value(row_iter, 2)
         modifiers = 0
-        if self._ctrl.get_active():
-            modifiers |= 0x01
-        if self._shift.get_active():
-            modifiers |= 0x02
-        if self._alt.get_active():
-            modifiers |= 0x04
-        if self._meta.get_active():
-            modifiers |= 0x08
-        return int(hid_code), modifiers
+        if kind == "key":
+            if self._ctrl.get_active():
+                modifiers |= 0x01
+            if self._shift.get_active():
+                modifiers |= 0x02
+            if self._alt.get_active():
+                modifiers |= 0x04
+            if self._meta.get_active():
+                modifiers |= 0x08
+        return kind, int(code), modifiers
 
 
 class OnboardButtonsDialog:
@@ -303,14 +329,15 @@ class OnboardButtonsDialog:
 
     def _start_choose(self, index: int, row: _ButtonRow) -> None:
         current_hid_code, current_modifiers = self._current_key_and_modifiers(index)
-        picker = _KeyPickerDialog(self._window, current_hid_code, current_modifiers)
+        current_consumer_code = self._current_consumer_code(index)
+        picker = _KeyPickerDialog(self._window, current_hid_code, current_modifiers, current_consumer_code)
         try:
             response = picker.run()
             if response == Gtk.ResponseType.OK:
                 result = picker.result()
                 if result is not None:
-                    hid_code, modifiers = result
-                    button = keymap.manual_button(hid_code, modifiers)
+                    kind, code, modifiers = result
+                    button = keymap.manual_button(code, modifiers) if kind == "key" else keymap.manual_consumer_button(code)
                     row.set_description(keymap.describe(button))
                     self._write(index, button)
         finally:
@@ -323,6 +350,14 @@ class OnboardButtonsDialog:
         value = self._setting._value if self._setting is not None else None
         button = value.get(index) if value else None
         return keymap.key_and_modifiers(button)
+
+    def _current_consumer_code(self, index: int) -> int | None:
+        """The Consumer-Control usage code a button slot currently holds, if
+        any -- the picker's other pre-selection case alongside
+        _current_key_and_modifiers()."""
+        value = self._setting._value if self._setting is not None else None
+        button = value.get(index) if value else None
+        return keymap.consumer_code(button)
 
     def _clear(self, index: int, row: _ButtonRow) -> None:
         button = keymap.unassigned_button()
