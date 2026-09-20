@@ -37,7 +37,8 @@ def _make_profile(sector: int, buttons: list):
 
 
 def _make_profiles(*profiles):
-    return SimpleNamespace(buttons=len(profiles[0].buttons) if profiles else 0, profiles={i + 1: p for i, p in enumerate(profiles)})
+    button_count = len(profiles[0].buttons) if profiles else 0
+    return SimpleNamespace(buttons=button_count, profiles={i + 1: p for i, p in enumerate(profiles)})
 
 
 def _make_onboard_profile_buttons(active_sector_value):

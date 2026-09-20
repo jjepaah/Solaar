@@ -14,22 +14,30 @@
 ## with this program; if not, write to the Free Software Foundation, Inc.,
 ## 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-"""Translate a captured GDK key event into a Solaar onboard-profile Button.
+"""Translate a chosen or captured key into a Solaar onboard-profile Button.
 
 Onboard profiles store button assignments as USB HID usage codes
 (``logitech_receiver.special_keys.USB_HID_KEYCODES``), the same table used
-for HID++ diversion rules. GDK key events carry an X11 keysym (``keyval``)
-instead, so a widget that lets someone "press a key to assign it" needs a
-keyval -> HID usage translation. There is no existing table for the
-specific subset of keys HID++ onboard profiles can express, so this module
-hand-maps the keys people actually rebind: letters, digits, the function
-row including F13-F24, the numpad (both NumLock-on and NumLock-off keyvals,
-since we can't assume the live NumLock state while capturing), navigation
-and editing keys, and the standard modifiers.
+for HID++ diversion rules. There are two ways the dialog lets someone pick
+one:
 
-Anything not in the resulting table (dead keys, IME composition keys, media
-keys not in the consumer-key table, ...) is reported as unsupported by
-``capture()`` rather than silently mapped to something wrong.
+- ``capture()`` resolves a live GDK key event (a physical keypress) to a
+  Button. GDK key events carry an X11 keysym (``keyval``), so this needs a
+  keyval -> HID usage translation; there's no existing table for the
+  specific subset of keys HID++ onboard profiles can express, so this
+  module hand-maps the keys people actually rebind: letters, digits, the
+  function row including F13-F24, the numpad (both NumLock-on and
+  NumLock-off keyvals, since we can't assume the live NumLock state while
+  capturing), navigation and editing keys, and the standard modifiers.
+  Anything not in the resulting table (dead keys, IME composition keys,
+  media keys not in the consumer-key table, ...) is reported as unsupported
+  rather than silently mapped to something wrong.
+- ``available_keys()`` + ``manual_button()`` instead let someone pick a key
+  by name from a list and choose modifiers with checkboxes -- for keys that
+  can be captured just fine in principle but that this particular keyboard
+  can't physically send (the numpad on a keyboard with no numpad block is
+  the case that motivated this: capture cannot solve that, no matter how
+  complete the keyval table is, so a name-based picker is the only way in).
 """
 
 from __future__ import annotations
@@ -64,8 +72,16 @@ for _letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
 # The top-row digit keys: HID usage codes 0x1E-0x27 (1,2,...,9,0). Only 0x1E/0x1F
 # are given string names ("1"/"2") in special_keys.py; the rest resolve by raw code.
 _DIGIT_HID_CODE = {
-    "1": 0x1E, "2": 0x1F, "3": 0x20, "4": 0x21, "5": 0x22,
-    "6": 0x23, "7": 0x24, "8": 0x25, "9": 0x26, "0": 0x27,
+    "1": 0x1E,
+    "2": 0x1F,
+    "3": 0x20,
+    "4": 0x21,
+    "5": 0x22,
+    "6": 0x23,
+    "7": 0x24,
+    "8": 0x25,
+    "9": 0x26,
+    "0": 0x27,
 }
 for _digit, _code in _DIGIT_HID_CODE.items():
     _keyval = getattr(Gdk, f"KEY_{_digit}", None)
@@ -164,19 +180,54 @@ def capture(keyval: int, state) -> CapturedKey | None:
     return CapturedKey(hid_code=hid_code, modifiers=modifiers, display_name=_format_display(key_name, modifiers))
 
 
+# Composed bit-by-bit rather than looked up in special_keys.modifiers, which only
+# spells out 11 of the 16 possible combinations (e.g. Ctrl+Alt+Shift together is
+# missing there) -- a modifier byte is a bitmask, so build the label the same way.
+_MODIFIER_PREFIX_BITS = (
+    (0x01, "Cntrl+"),
+    (0x02, "Shift+"),
+    (0x04, "Alt+"),
+    (0x08, "Meta+"),
+)
+
+
 def _format_display(key_name: str, modifiers: int) -> str:
-    prefix = special_keys.modifiers.get(modifiers, "")
+    prefix = "".join(label for bit, label in _MODIFIER_PREFIX_BITS if modifiers & bit)
     return f"{prefix}{key_name}"
 
 
 def to_button(captured: CapturedKey) -> hidpp20.Button:
     """Build the onboard-profile Button entry for a captured key."""
+    return manual_button(captured.hid_code, captured.modifiers)
+
+
+def manual_button(hid_code: int, modifiers: int = 0) -> hidpp20.Button:
+    """Build the onboard-profile Button entry for an explicitly chosen key.
+
+    Same shape as ``to_button()`` (SEND / MODIFIER_AND_KEY) -- this is the
+    "choose from a list" path's counterpart to a physical-key capture.
+    """
     return hidpp20.Button(
         behavior=int(hidpp20.ButtonBehavior.SEND),
         type=int(hidpp20.ButtonMappingType.MODIFIER_AND_KEY),
-        modifiers=captured.modifiers,
-        value=captured.hid_code,
+        modifiers=modifiers,
+        value=hid_code,
     )
+
+
+def available_keys() -> list[tuple[str, int]]:
+    """(name, HID code) pairs the manual picker can offer, sorted by name.
+
+    Merges Solaar's named USB_HID_KEYCODES table with the top-row digit
+    codes 3-9 and 0, which that table leaves unnamed (only "1" and "2" are
+    named upstream -- see _DIGIT_HID_CODE above); everything else capture
+    can reach (letters, F-keys, numpad, navigation, ...) is already named
+    there and needs no patching in.
+    """
+    combined = dict(_HID_NAME_TO_CODE)
+    for _digit, _code in _DIGIT_HID_CODE.items():
+        combined.setdefault(_digit, _code)
+    return sorted(combined.items())
 
 
 def unassigned_button() -> hidpp20.Button:
@@ -184,20 +235,34 @@ def unassigned_button() -> hidpp20.Button:
     return hidpp20.Button(behavior=15, bytes=b"\xff\xff\xff\xff")
 
 
+def key_and_modifiers(button: hidpp20.Button | None) -> tuple[int | None, int]:
+    """The (hid_code, modifiers) a Button holds, if it's a plain key mapping.
+
+    Returns (None, 0) for anything else (unassigned, mouse buttons, consumer
+    keys, device functions) -- the single place that decides what counts as
+    "a plain key mapping" for this editor, shared by describe() and the
+    dialog's "choose from a list" picker so they can't disagree.
+    """
+    behavior = getattr(button, "behavior", None) if button is not None else None
+    is_key_send = behavior == int(hidpp20.ButtonBehavior.SEND)
+    is_key_send = is_key_send and getattr(button, "type", None) == int(hidpp20.ButtonMappingType.MODIFIER_AND_KEY)
+    if not is_key_send:
+        return None, 0
+    return getattr(button, "value", None), getattr(button, "modifiers", 0) or 0
+
+
 def describe(button: hidpp20.Button | None) -> str:
     """Human-readable summary of a button's current assignment, for its row label."""
     behavior = getattr(button, "behavior", None) if button is not None else None
     if behavior is None or behavior == 15:
         return _("(unassigned)")
-    is_key_send = behavior == int(hidpp20.ButtonBehavior.SEND)
-    is_key_send = is_key_send and getattr(button, "type", None) == int(hidpp20.ButtonMappingType.MODIFIER_AND_KEY)
-    if is_key_send:
-        hid_code = getattr(button, "value", None)
+    hid_code, modifiers = key_and_modifiers(button)
+    if hid_code is not None:
         if hid_code in special_keys.USB_HID_KEYCODES:
             key_name = str(special_keys.USB_HID_KEYCODES[hid_code])
         else:
             key_name = str(hid_code)
-        return _format_display(key_name, getattr(button, "modifiers", 0) or 0)
+        return _format_display(key_name, modifiers)
     # Mouse buttons, consumer keys, and device functions are out of scope for
     # this editor (v1) -- show that something is set without offering to edit it.
     return _("(set via CLI -- not a plain key mapping)")

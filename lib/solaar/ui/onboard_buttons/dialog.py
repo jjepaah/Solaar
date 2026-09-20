@@ -69,9 +69,9 @@ _dialogs: dict[Hashable, "OnboardButtonsDialog"] = {}
 
 
 class _ButtonRow(Gtk.Box):
-    """One row: slot label, current-assignment summary, capture + clear buttons."""
+    """One row: slot label, current-assignment summary, capture/choose/clear buttons."""
 
-    def __init__(self, index: int, button, on_capture, on_clear) -> None:
+    def __init__(self, index: int, button, on_capture, on_choose, on_clear) -> None:
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._index = index
         self.set_border_width(4)
@@ -85,6 +85,11 @@ class _ButtonRow(Gtk.Box):
         self._current.set_xalign(0.0)
         self.pack_start(self._current, True, True, 0)
 
+        choose_btn = Gtk.Button(label=_("Choose from list…"))
+        choose_btn.set_tooltip_text(_("Pick a key by name -- for keys this keyboard can't send (e.g. a numpad key)"))
+        choose_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_choose(self._index, self))
+        self.pack_end(choose_btn, False, False, 0)
+
         capture_btn = Gtk.Button(label=_("Capture key…"))
         capture_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_capture(self._index, self))
         self.pack_end(capture_btn, False, False, 0)
@@ -95,6 +100,64 @@ class _ButtonRow(Gtk.Box):
 
     def set_description(self, text: str) -> None:
         self._current.set_text(text)
+
+
+class _KeyPickerDialog(Gtk.Dialog):
+    """Modal "choose a key by name" dialog: the counterpart to capture-by-keypress.
+
+    Capture can only ever offer keys the *current* keyboard can physically
+    send. A numpad key on a keyboard with no numpad block, for example, can
+    never arrive as a GDK key event no matter how complete the capture table
+    is -- the only way in is picking it by name, with modifiers chosen
+    separately via checkboxes instead of read off the live event state.
+    """
+
+    def __init__(self, parent: Gtk.Window, current_hid_code: int | None, current_modifiers: int) -> None:
+        super().__init__(title=_("Choose a Key"), transient_for=parent, modal=True)
+        self.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("OK"), Gtk.ResponseType.OK)
+        self.set_default_size(280, -1)
+
+        box = self.get_content_area()
+        box.set_spacing(6)
+        box.set_border_width(8)
+
+        self._combo = Gtk.ComboBoxText()
+        for name, hid_code in keymap.available_keys():
+            self._combo.append(str(hid_code), name)
+        if current_hid_code is None or not self._combo.set_active_id(str(current_hid_code)):
+            self._combo.set_active(0)
+        box.pack_start(self._combo, False, False, 0)
+
+        mod_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self._ctrl = Gtk.CheckButton(label=_("Ctrl"))
+        self._shift = Gtk.CheckButton(label=_("Shift"))
+        self._alt = Gtk.CheckButton(label=_("Alt"))
+        self._meta = Gtk.CheckButton(label=_("Meta"))
+        self._ctrl.set_active(bool(current_modifiers & 0x01))
+        self._shift.set_active(bool(current_modifiers & 0x02))
+        self._alt.set_active(bool(current_modifiers & 0x04))
+        self._meta.set_active(bool(current_modifiers & 0x08))
+        for check in (self._ctrl, self._shift, self._alt, self._meta):
+            mod_box.pack_start(check, False, False, 0)
+        box.pack_start(mod_box, False, False, 0)
+
+        self.show_all()
+
+    def result(self) -> tuple[int, int] | None:
+        """The chosen (hid_code, modifiers), or None if nothing is selected."""
+        hid_code_str = self._combo.get_active_id()
+        if hid_code_str is None:
+            return None
+        modifiers = 0
+        if self._ctrl.get_active():
+            modifiers |= 0x01
+        if self._shift.get_active():
+            modifiers |= 0x02
+        if self._alt.get_active():
+            modifiers |= 0x04
+        if self._meta.get_active():
+            modifiers |= 0x08
+        return int(hid_code_str), modifiers
 
 
 class OnboardButtonsDialog:
@@ -185,7 +248,7 @@ class OnboardButtonsDialog:
         if not value:
             return
         for index in sorted(value):
-            row = _ButtonRow(index, value[index], self._start_capture, self._clear)
+            row = _ButtonRow(index, value[index], self._start_capture, self._start_choose, self._clear)
             self._rows[index] = row
             self._listbox.add(row)
         self._listbox.show_all()
@@ -195,6 +258,29 @@ class OnboardButtonsDialog:
         row.set_description(_("Press a key… (Esc to cancel)"))
         if self._capture_overlay is not None:
             self._capture_overlay.set_text(_("Listening for a key press for Button {index}…").format(index=index + 1))
+
+    def _start_choose(self, index: int, row: _ButtonRow) -> None:
+        current_hid_code, current_modifiers = self._current_key_and_modifiers(index)
+        picker = _KeyPickerDialog(self._window, current_hid_code, current_modifiers)
+        try:
+            response = picker.run()
+            if response == Gtk.ResponseType.OK:
+                result = picker.result()
+                if result is not None:
+                    hid_code, modifiers = result
+                    button = keymap.manual_button(hid_code, modifiers)
+                    row.set_description(keymap.describe(button))
+                    self._write(index, button)
+        finally:
+            picker.destroy()
+
+    def _current_key_and_modifiers(self, index: int) -> tuple[int | None, int]:
+        """The (hid_code, modifiers) a button slot currently holds, if it's a
+        plain key mapping -- used to pre-select the picker on an existing
+        assignment rather than always opening on the first entry."""
+        value = self._setting._value if self._setting is not None else None
+        button = value.get(index) if value else None
+        return keymap.key_and_modifiers(button)
 
     def _clear(self, index: int, row: _ButtonRow) -> None:
         button = keymap.unassigned_button()
