@@ -39,13 +39,11 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk  # NOQA: E402
-from gi.repository import GLib  # NOQA: E402
 from gi.repository import Gtk  # NOQA: E402
 
 from solaar.i18n import _  # NOQA: E402
 
 from . import keymap  # NOQA: E402
-from .evdev_listener import ProbeListener  # NOQA: E402
 
 logger = logging.getLogger(__name__)
 
@@ -103,13 +101,6 @@ class _ButtonRow(Gtk.Box):
 
     def set_description(self, text: str) -> None:
         self._current.set_text(text)
-
-    def set_actions_sensitive(self, sensitive: bool) -> None:
-        # Greyed out while "Identify Buttons" is running -- every slot is
-        # temporarily holding a probe key at that point, so editing one from
-        # here would just get overwritten again when identifying stops.
-        for button in (self._choose_btn, self._capture_btn, self._clear_btn):
-            button.set_sensitive(sensitive)
 
 
 class _KeyPickerDialog(Gtk.Dialog):
@@ -247,43 +238,26 @@ class OnboardButtonsDialog:
         self._window: Gtk.Window | None = None
         self._listbox: Gtk.ListBox | None = None
         self._capture_overlay: Gtk.Label | None = None
-        self._identify_button: Gtk.Button | None = None
         self._setting = None
         self._sbox = None
         self._rows: dict[int, _ButtonRow] = {}
         self._capturing_index: int | None = None
-        self._identifying = False
-        self._identify_reverse: dict[int, int] = {}
-        self._pre_identify_value: dict | None = None
-        self._probe_listener: ProbeListener | None = None
 
     def _on_delete(self, _w, _e) -> bool:
-        if self._identifying:
-            # Don't let closing the window strand the mouse mid-identify --
-            # every probed button is currently holding a throwaway F13-F24
-            # assignment, not what was there before.
-            self._stop_identify()
         self._destroy()
         _dialogs.pop(self._key, None)
         return True
 
     def _destroy(self) -> None:
-        if self._probe_listener is not None:
-            self._probe_listener.stop()
-            self._probe_listener = None
         if self._window is not None:
             self._window.destroy()
         self._window = None
         self._listbox = None
         self._capture_overlay = None
-        self._identify_button = None
         self._setting = None
         self._sbox = None
         self._rows = {}
         self._capturing_index = None
-        self._identifying = False
-        self._identify_reverse = {}
-        self._pre_identify_value = None
 
     def present(self, setting, sbox) -> None:
         if self._window is not None and self._setting is setting:
@@ -320,20 +294,6 @@ class OnboardButtonsDialog:
         info.set_line_wrap(True)
         info.set_xalign(0.0)
         outer.pack_start(info, False, False, 0)
-
-        identify_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self._identify_button = Gtk.Button(label=_("Identify Buttons…"))
-        self._identify_button.set_tooltip_text(
-            _(
-                "Temporarily reassign the other buttons to distinct keys, then press each "
-                "physical button on your mouse to see which row it is here. Whichever button "
-                "currently sends Left Click is left alone so you can still click normally; "
-                "press Escape at any time to stop and restore everything immediately."
-            )
-        )
-        self._identify_button.connect(GtkSignal.CLICKED.value, self._toggle_identify)
-        identify_row.pack_start(self._identify_button, False, False, 0)
-        outer.pack_start(identify_row, False, False, 0)
 
         self._capture_overlay = Gtk.Label(label="")
         self._capture_overlay.set_line_wrap(True)
@@ -427,17 +387,6 @@ class OnboardButtonsDialog:
         self._write(index, keymap.unassigned_button(), row)
 
     def _on_key_press(self, _widget, event) -> bool:
-        if self._identifying:
-            if event.keyval == Gdk.KEY_Escape:
-                self._stop_identify()
-                return True
-            captured = keymap.capture(event.keyval, event.state)
-            if captured is not None and captured.hid_code in self._identify_reverse:
-                index = self._identify_reverse[captured.hid_code]
-                if self._capture_overlay is not None:
-                    self._capture_overlay.set_text(_("That was Button {index}!").format(index=index + 1))
-            return True
-
         if self._capturing_index is None:
             return False
         index = self._capturing_index
@@ -514,108 +463,6 @@ class OnboardButtonsDialog:
         from solaar.ui.config_panel import _write_async
 
         _write_async(self._setting, button, self._sbox, key=index)
-
-    def _start_identify(self, _btn) -> None:
-        if self._identifying or self._capturing_index is not None:
-            return
-        value = self._setting._value if self._setting is not None else None
-        if not value:
-            return
-        # Leave whichever button currently sends Left Click untouched, so
-        # there's still a working way to click things in this window (and
-        # anywhere else) throughout the identify session -- see the
-        # left-click safety discussion in keymap's module docstring.
-        indices = [index for index in sorted(value) if not keymap.is_left_click(value[index])]
-        codes = keymap.identify_probe_codes(len(indices))
-        probe_map = {index: keymap.manual_button(code) for index, code in zip(indices, codes)}
-        if not probe_map:
-            return
-        self._pre_identify_value = dict(value)
-        # Kept as a fallback: still resolved from an ordinary GTK
-        # key-press-event in _on_key_press() below, in case a press does
-        # reach this window normally. The raw evdev path started next is
-        # what actually solves the problem this exists to solve -- see
-        # keymap's module docstring and evdev_listener's -- since a press
-        # a desktop shortcut intercepts never reaches here as a
-        # key-press-event at all.
-        self._identify_reverse = {code: index for index, code in zip(indices, codes)}
-        self._identifying = True
-        for row in self._rows.values():
-            row.set_actions_sensitive(False)
-        if self._identify_button is not None:
-            self._identify_button.set_label(_("Stop Identifying"))
-
-        evdev_codes = keymap.identify_probe_evdev_codes(len(indices))
-        code_to_index = dict(zip(indices, evdev_codes))
-        listener = ProbeListener(code_to_index, on_match=self._on_probe_match)
-        raw_input_active = listener.start()
-        self._probe_listener = listener if raw_input_active else None
-
-        skipped = len(indices) - len(probe_map)
-        if raw_input_active:
-            message = _(
-                "Press each button on your mouse -- I’ll show you which one it is here, even if "
-                "it opens something else on your system. Press Escape or click “Stop Identifying” "
-                "when done."
-            )
-        else:
-            # Raw-input reading isn't available (python-evdev missing, or no
-            # permission to read the input devices) -- fall back to plain
-            # key-press-event capture, which a desktop keyboard shortcut can
-            # intercept before it reaches this window.
-            message = _(
-                "Press each button on your mouse -- I’ll show you which one it is here. Keep this "
-                "window focused. If a button opens something else on your system instead of "
-                "showing up here, your desktop has a keyboard shortcut bound to it that's "
-                "intercepting the press -- try a different button, or free up that shortcut. "
-                "Press Escape or click “Stop Identifying” when done."
-            )
-        if skipped > 0:
-            message += " " + _("Only the first {count} buttons could be identified at once.").format(count=len(probe_map))
-        if self._capture_overlay is not None:
-            self._capture_overlay.set_text(message)
-
-        from solaar.ui.config_panel import _write_async
-
-        _write_async(self._setting, probe_map, self._sbox)
-
-    def _on_probe_match(self, index: int) -> None:
-        # Called from the evdev_listener background thread -- GTK widgets
-        # may only be touched from the main thread, so marshal back via
-        # GLib.idle_add rather than updating the overlay directly here.
-        GLib.idle_add(self._show_probe_match, index)
-
-    def _show_probe_match(self, index: int) -> bool:
-        if self._identifying and self._capture_overlay is not None:
-            self._capture_overlay.set_text(_("That was Button {index}!").format(index=index + 1))
-        return GLib.SOURCE_REMOVE
-
-    def _stop_identify(self) -> None:
-        if not self._identifying:
-            return
-        self._identifying = False
-        self._identify_reverse = {}
-        if self._probe_listener is not None:
-            self._probe_listener.stop()
-            self._probe_listener = None
-        for row in self._rows.values():
-            row.set_actions_sensitive(True)
-        if self._identify_button is not None:
-            self._identify_button.set_label(_("Identify Buttons…"))
-        if self._capture_overlay is not None:
-            self._capture_overlay.set_text("")
-        restore = self._pre_identify_value
-        self._pre_identify_value = None
-        if restore is not None and self._setting is not None:
-            from solaar.ui.config_panel import _write_async
-
-            _write_async(self._setting, restore, self._sbox)
-
-    def _toggle_identify(self, btn) -> None:
-        if self._identifying:
-            self._stop_identify()
-        else:
-            self._start_identify(btn)
 
 
 def get_dialog(key: Hashable) -> OnboardButtonsDialog:

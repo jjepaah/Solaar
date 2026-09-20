@@ -14,13 +14,12 @@
 ## with this program; if not, write to the Free Software Foundation, Inc.,
 ## 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-"""Unit tests for solaar.ui.onboard_buttons.keymap's mouse-click support
-and the "Identify Buttons" probe-code helper.
+"""Unit tests for solaar.ui.onboard_buttons.keymap's mouse-click support.
 
 The Consumer-Control-key tests that motivated this module's third Button
 wire type live alongside it; these focus on the mouse-click type added
-after it, plus is_left_click() and identify_probe_codes(), which the
-dialog's left-click safety check and "Identify Buttons" feature depend on.
+after it, plus is_left_click(), which the dialog's left-click safety check
+depends on.
 """
 
 from __future__ import annotations
@@ -88,32 +87,3 @@ def test_mouse_button_code_is_none_for_other_button_kinds():
     assert keymap.mouse_button_code(browser_back) is None
     assert keymap.key_and_modifiers(browser_back) == (None, 0)
     assert keymap.consumer_code(a_key) is None
-
-
-def test_identify_probe_codes_caps_at_twelve_f_keys_f13_through_f24():
-    key_codes = {name: code for name, code, kind in keymap.available_keys() if kind == "key"}
-
-    codes = keymap.identify_probe_codes(5)
-    assert codes == [key_codes["F13"], key_codes["F14"], key_codes["F15"], key_codes["F16"], key_codes["F17"]]
-
-    assert keymap.identify_probe_codes(0) == []
-    assert len(keymap.identify_probe_codes(100)) == 12  # F13..F24, no more available
-
-
-def test_identify_probe_evdev_codes_matches_the_hid_codes_one_for_one():
-    # evdev_listener reads raw kernel input events, which use Linux's own
-    # KEY_* numbering (input-event-codes.h) rather than the USB HID usage
-    # codes identify_probe_codes() returns for building the probe Buttons --
-    # this is the translation table bridging the two, and it must stay in
-    # lockstep (same F-key, same position) with identify_probe_codes() since
-    # the dialog zips both against the same list of button indices.
-    hid_codes = keymap.identify_probe_codes(12)
-    evdev_codes = keymap.identify_probe_evdev_codes(12)
-
-    assert len(evdev_codes) == len(hid_codes) == 12
-    # Real Linux evdev KEY_F13..KEY_F24 constants (183..194), not just "12
-    # distinct numbers" -- a fixed, well-known part of the kernel's uapi.
-    assert evdev_codes == list(range(183, 195))
-
-    assert keymap.identify_probe_evdev_codes(0) == []
-    assert len(keymap.identify_probe_evdev_codes(100)) == 12
