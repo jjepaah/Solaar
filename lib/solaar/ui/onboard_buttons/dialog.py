@@ -86,21 +86,28 @@ class _ButtonRow(Gtk.Box):
         self._current.set_xalign(0.0)
         self.pack_start(self._current, True, True, 0)
 
-        choose_btn = Gtk.Button(label=_("Choose from list…"))
-        choose_btn.set_tooltip_text(_("Pick a key by name -- for keys this keyboard can't send (e.g. a numpad key)"))
-        choose_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_choose(self._index, self))
-        self.pack_end(choose_btn, False, False, 0)
+        self._choose_btn = Gtk.Button(label=_("Choose from list…"))
+        self._choose_btn.set_tooltip_text(_("Pick a key by name -- for keys this keyboard can't send (e.g. a numpad key)"))
+        self._choose_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_choose(self._index, self))
+        self.pack_end(self._choose_btn, False, False, 0)
 
-        capture_btn = Gtk.Button(label=_("Capture key…"))
-        capture_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_capture(self._index, self))
-        self.pack_end(capture_btn, False, False, 0)
+        self._capture_btn = Gtk.Button(label=_("Capture key…"))
+        self._capture_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_capture(self._index, self))
+        self.pack_end(self._capture_btn, False, False, 0)
 
-        clear_btn = Gtk.Button(label=_("Clear"))
-        clear_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_clear(self._index, self))
-        self.pack_end(clear_btn, False, False, 0)
+        self._clear_btn = Gtk.Button(label=_("Clear"))
+        self._clear_btn.connect(GtkSignal.CLICKED.value, lambda _b: on_clear(self._index, self))
+        self.pack_end(self._clear_btn, False, False, 0)
 
     def set_description(self, text: str) -> None:
         self._current.set_text(text)
+
+    def set_actions_sensitive(self, sensitive: bool) -> None:
+        # Greyed out while "Identify Buttons" is running -- every slot is
+        # temporarily holding a probe key at that point, so editing one from
+        # here would just get overwritten again when identifying stops.
+        for button in (self._choose_btn, self._capture_btn, self._clear_btn):
+            button.set_sensitive(sensitive)
 
 
 class _KeyPickerDialog(Gtk.Dialog):
@@ -126,6 +133,7 @@ class _KeyPickerDialog(Gtk.Dialog):
         current_hid_code: int | None,
         current_modifiers: int,
         current_consumer_code: int | None = None,
+        current_mouse_code: int | None = None,
     ) -> None:
         super().__init__(title=_("Choose a Key"), transient_for=parent, modal=True)
         self.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("OK"), Gtk.ResponseType.OK)
@@ -139,13 +147,15 @@ class _KeyPickerDialog(Gtk.Dialog):
         # ~100 entries it opened spanning the full screen. A Gtk.TreeView
         # embedded directly in the dialog (in a height-capped, scrollable
         # window) behaves like an ordinary bounded dropdown list instead.
-        self._store = Gtk.ListStore(str, int, str)  # display name, code, kind ("key" / "consumer")
+        self._store = Gtk.ListStore(str, int, str)  # display name, code, kind ("mouse" / "key" / "consumer")
         selected_iter = None
         for name, code, kind in keymap.available_keys():
             row_iter = self._store.append([name, code, kind])
             if kind == "key" and current_hid_code is not None and code == current_hid_code:
                 selected_iter = row_iter
             elif kind == "consumer" and current_consumer_code is not None and code == current_consumer_code:
+                selected_iter = row_iter
+            elif kind == "mouse" and current_mouse_code is not None and code == current_mouse_code:
                 selected_iter = row_iter
 
         self._view = Gtk.TreeView(model=self._store)
@@ -195,20 +205,21 @@ class _KeyPickerDialog(Gtk.Dialog):
         self.response(Gtk.ResponseType.OK)
 
     def _on_selection_changed(self, selection: Gtk.TreeSelection) -> None:
-        # A Consumer-Control key (browser back, volume, ...) has no
-        # modifiers byte in its Button encoding -- see
-        # keymap.manual_consumer_button() -- so grey the checkboxes out
-        # rather than silently ignoring them once a key of that kind is
-        # picked.
+        # A Consumer-Control key (browser back, volume, ...) or a mouse-click
+        # assignment (Left Click, ...) has no modifiers byte in its Button
+        # encoding -- see keymap.manual_consumer_button()/manual_mouse_
+        # button() -- so grey the checkboxes out rather than silently
+        # ignoring them once a key of one of those kinds is picked.
         model, row_iter = selection.get_selected()
         is_key = row_iter is not None and model.get_value(row_iter, 2) == "key"
         self._mod_box.set_sensitive(is_key)
 
     def result(self) -> tuple[str, int, int] | None:
         """(kind, code, modifiers) for the chosen row, or None if nothing is
-        selected. ``kind`` is "key" or "consumer" (see
-        keymap.available_keys()); modifiers is always 0 for a "consumer"
-        row, since that Button type carries no modifiers byte at all.
+        selected. ``kind`` is "mouse", "key", or "consumer" (see
+        keymap.available_keys()); modifiers is always 0 for "mouse" and
+        "consumer" rows, since those Button types carry no modifiers byte
+        at all.
         """
         model, row_iter = self._selection.get_selected()
         if row_iter is None:
@@ -234,12 +245,21 @@ class OnboardButtonsDialog:
         self._window: Gtk.Window | None = None
         self._listbox: Gtk.ListBox | None = None
         self._capture_overlay: Gtk.Label | None = None
+        self._identify_button: Gtk.Button | None = None
         self._setting = None
         self._sbox = None
         self._rows: dict[int, _ButtonRow] = {}
         self._capturing_index: int | None = None
+        self._identifying = False
+        self._identify_reverse: dict[int, int] = {}
+        self._pre_identify_value: dict | None = None
 
     def _on_delete(self, _w, _e) -> bool:
+        if self._identifying:
+            # Don't let closing the window strand the mouse mid-identify --
+            # every probed button is currently holding a throwaway F13-F24
+            # assignment, not what was there before.
+            self._stop_identify()
         self._destroy()
         _dialogs.pop(self._key, None)
         return True
@@ -250,10 +270,14 @@ class OnboardButtonsDialog:
         self._window = None
         self._listbox = None
         self._capture_overlay = None
+        self._identify_button = None
         self._setting = None
         self._sbox = None
         self._rows = {}
         self._capturing_index = None
+        self._identifying = False
+        self._identify_reverse = {}
+        self._pre_identify_value = None
 
     def present(self, setting, sbox) -> None:
         if self._window is not None and self._setting is setting:
@@ -291,7 +315,22 @@ class OnboardButtonsDialog:
         info.set_xalign(0.0)
         outer.pack_start(info, False, False, 0)
 
+        identify_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._identify_button = Gtk.Button(label=_("Identify Buttons…"))
+        self._identify_button.set_tooltip_text(
+            _(
+                "Temporarily reassign the other buttons to distinct keys, then press each "
+                "physical button on your mouse to see which row it is here. Whichever button "
+                "currently sends Left Click is left alone so you can still click normally; "
+                "press Escape at any time to stop and restore everything immediately."
+            )
+        )
+        self._identify_button.connect(GtkSignal.CLICKED.value, self._toggle_identify)
+        identify_row.pack_start(self._identify_button, False, False, 0)
+        outer.pack_start(identify_row, False, False, 0)
+
         self._capture_overlay = Gtk.Label(label="")
+        self._capture_overlay.set_line_wrap(True)
         self._capture_overlay.set_xalign(0.0)
         outer.pack_start(self._capture_overlay, False, False, 0)
 
@@ -337,16 +376,21 @@ class OnboardButtonsDialog:
     def _start_choose(self, index: int, row: _ButtonRow) -> None:
         current_hid_code, current_modifiers = self._current_key_and_modifiers(index)
         current_consumer_code = self._current_consumer_code(index)
-        picker = _KeyPickerDialog(self._window, current_hid_code, current_modifiers, current_consumer_code)
+        current_mouse_code = self._current_mouse_code(index)
+        picker = _KeyPickerDialog(self._window, current_hid_code, current_modifiers, current_consumer_code, current_mouse_code)
         try:
             response = picker.run()
             if response == Gtk.ResponseType.OK:
                 result = picker.result()
                 if result is not None:
                     kind, code, modifiers = result
-                    button = keymap.manual_button(code, modifiers) if kind == "key" else keymap.manual_consumer_button(code)
-                    row.set_description(keymap.describe(button))
-                    self._write(index, button)
+                    if kind == "key":
+                        button = keymap.manual_button(code, modifiers)
+                    elif kind == "consumer":
+                        button = keymap.manual_consumer_button(code)
+                    else:
+                        button = keymap.manual_mouse_button(code)
+                    self._write(index, button, row)
         finally:
             picker.destroy()
 
@@ -360,18 +404,34 @@ class OnboardButtonsDialog:
 
     def _current_consumer_code(self, index: int) -> int | None:
         """The Consumer-Control usage code a button slot currently holds, if
-        any -- the picker's other pre-selection case alongside
+        any -- one of the picker's other pre-selection cases alongside
         _current_key_and_modifiers()."""
         value = self._setting._value if self._setting is not None else None
         button = value.get(index) if value else None
         return keymap.consumer_code(button)
 
+    def _current_mouse_code(self, index: int) -> int | None:
+        """The mouse-click code a button slot currently holds, if any -- the
+        picker's third pre-selection case."""
+        value = self._setting._value if self._setting is not None else None
+        button = value.get(index) if value else None
+        return keymap.mouse_button_code(button)
+
     def _clear(self, index: int, row: _ButtonRow) -> None:
-        button = keymap.unassigned_button()
-        row.set_description(keymap.describe(button))
-        self._write(index, button)
+        self._write(index, keymap.unassigned_button(), row)
 
     def _on_key_press(self, _widget, event) -> bool:
+        if self._identifying:
+            if event.keyval == Gdk.KEY_Escape:
+                self._stop_identify()
+                return True
+            captured = keymap.capture(event.keyval, event.state)
+            if captured is not None and captured.hid_code in self._identify_reverse:
+                index = self._identify_reverse[captured.hid_code]
+                if self._capture_overlay is not None:
+                    self._capture_overlay.set_text(_("That was Button {index}!").format(index=index + 1))
+            return True
+
         if self._capturing_index is None:
             return False
         index = self._capturing_index
@@ -393,9 +453,7 @@ class OnboardButtonsDialog:
             return True
 
         button = keymap.to_button(captured)
-        if row is not None:
-            row.set_description(keymap.describe(button))
-        self._write(index, button)
+        self._write(index, button, row)
         return True
 
     def _cancel_capture(self, index: int, row: _ButtonRow | None) -> None:
@@ -405,14 +463,111 @@ class OnboardButtonsDialog:
         if row is not None and self._setting is not None and self._setting._value:
             row.set_description(keymap.describe(self._setting._value.get(index)))
 
-    def _write(self, index: int, button) -> None:
+    def _would_remove_last_left_click(self, index: int, button) -> bool:
+        """Whether writing ``button`` to slot ``index`` would leave no
+        button anywhere sending Left Click.
+
+        Checked by simulating the edit against the live mapping rather than
+        assuming any particular slot index is "the" Left Click button --
+        the protocol has no such rule (see keymap.is_left_click()).
+        """
+        value = self._setting._value if self._setting is not None else None
+        if not value:
+            return False
+        simulated = dict(value)
+        simulated[index] = button
+        return not any(keymap.is_left_click(b) for b in simulated.values())
+
+    def _confirm_remove_last_left_click(self) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self._window,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=_("No button would send a Left Click after this change."),
+        )
+        dialog.format_secondary_text(
+            _(
+                "You may not be able to left-click anything with this mouse until you fix that "
+                "here or with 'solaar profiles' on the command line. Continue anyway?"
+            )
+        )
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.YES
+
+    def _write(self, index: int, button, row: _ButtonRow | None = None) -> None:
         if self._setting is None:
             return
+        if self._would_remove_last_left_click(index, button) and not self._confirm_remove_last_left_click():
+            return  # cancelled -- leave the row and the device untouched
+        if row is not None:
+            row.set_description(keymap.describe(button))
         # Lazy import: config_panel imports settings/UI machinery that would
         # otherwise create a circular import with this package at load time.
         from solaar.ui.config_panel import _write_async
 
         _write_async(self._setting, button, self._sbox, key=index)
+
+    def _start_identify(self, _btn) -> None:
+        if self._identifying or self._capturing_index is not None:
+            return
+        value = self._setting._value if self._setting is not None else None
+        if not value:
+            return
+        # Leave whichever button currently sends Left Click untouched, so
+        # there's still a working way to click things in this window (and
+        # anywhere else) throughout the identify session -- see the
+        # left-click safety discussion in keymap's module docstring.
+        indices = [index for index in sorted(value) if not keymap.is_left_click(value[index])]
+        codes = keymap.identify_probe_codes(len(indices))
+        probe_map = {index: keymap.manual_button(code) for index, code in zip(indices, codes)}
+        if not probe_map:
+            return
+        self._pre_identify_value = dict(value)
+        self._identify_reverse = {code: index for index, code in zip(indices, codes)}
+        self._identifying = True
+        for row in self._rows.values():
+            row.set_actions_sensitive(False)
+        if self._identify_button is not None:
+            self._identify_button.set_label(_("Stop Identifying"))
+        skipped = len(indices) - len(probe_map)
+        message = _(
+            "Press each button on your mouse -- I’ll show you which one it is here. "
+            "Keep this window focused. Press Escape or click “Stop Identifying” when done."
+        )
+        if skipped > 0:
+            message += " " + _("Only the first {count} buttons could be identified at once.").format(count=len(probe_map))
+        if self._capture_overlay is not None:
+            self._capture_overlay.set_text(message)
+
+        from solaar.ui.config_panel import _write_async
+
+        _write_async(self._setting, probe_map, self._sbox)
+
+    def _stop_identify(self) -> None:
+        if not self._identifying:
+            return
+        self._identifying = False
+        self._identify_reverse = {}
+        for row in self._rows.values():
+            row.set_actions_sensitive(True)
+        if self._identify_button is not None:
+            self._identify_button.set_label(_("Identify Buttons…"))
+        if self._capture_overlay is not None:
+            self._capture_overlay.set_text("")
+        restore = self._pre_identify_value
+        self._pre_identify_value = None
+        if restore is not None and self._setting is not None:
+            from solaar.ui.config_panel import _write_async
+
+            _write_async(self._setting, restore, self._sbox)
+
+    def _toggle_identify(self, btn) -> None:
+        if self._identifying:
+            self._stop_identify()
+        else:
+            self._start_identify(btn)
 
 
 def get_dialog(key: Hashable) -> OnboardButtonsDialog:

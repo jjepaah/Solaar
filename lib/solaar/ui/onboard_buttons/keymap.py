@@ -53,6 +53,17 @@ HID spec and many systems and compositors don't recognize it (this is why
 Browser Back/Forward chosen from an earlier version of this picker did
 nothing). The curated list below offers the real Consumer-Control
 equivalents instead, which is the standard, portable way to send these.
+
+A third group offers mouse-click assignments (Left/Right/Middle Click,
+Back, Forward) via ``manual_mouse_button()`` -- another distinct Button
+wire type (behavior SEND, type BUTTON, a 2-byte code from
+``special_keys.MOUSE_BUTTONS``, also with no modifiers byte). This is what
+lets someone put a Left Click back on a button after moving it elsewhere,
+or add a second button that also sends Left Click -- see ``is_left_click()``,
+which the dialog uses to warn before a change would leave no button at all
+sending Left Click, since every onboard-profile button slot can hold any
+assignment (there's no protocol rule that slot 0/1/2 has to stay
+left/right/middle -- that's just each device's factory default).
 """
 
 from __future__ import annotations
@@ -181,6 +192,25 @@ _CURATED_CONSUMER_KEYS: dict[str, str] = {
 _CONSUMER_CODE_TO_LABEL: dict[int, str] = {
     int(special_keys.HID_CONSUMERCODES[attr]): label for label, attr in _CURATED_CONSUMER_KEYS.items()
 }
+
+# Mouse-click assignments -- a third Button wire type alongside keyboard
+# keys and Consumer-Control keys (see module docstring). special_keys.
+# MOUSE_BUTTONS is a bitmask table (Mouse_Button_Left=0x0001, _Right=0x0002,
+# _Middle=0x0004, ...); only the handful someone would actually want to put
+# on a button are offered here, in the order people expect to see them.
+_CURATED_MOUSE_BUTTONS: dict[str, str] = {
+    "Left Click": "Mouse_Button_Left",
+    "Right Click": "Mouse_Button_Right",
+    "Middle Click": "Mouse_Button_Middle",
+    "Mouse Back": "Mouse_Button_Back",
+    "Mouse Forward": "Mouse_Button_Forward",
+}
+
+_MOUSE_CODE_TO_LABEL: dict[int, str] = {
+    int(special_keys.MOUSE_BUTTONS[attr]): label for label, attr in _CURATED_MOUSE_BUTTONS.items()
+}
+
+_LEFT_CLICK_CODE: int = int(special_keys.MOUSE_BUTTONS["Mouse_Button_Left"])
 
 
 def _map_name(gdk_attr: str, hid_name: str) -> None:
@@ -355,6 +385,21 @@ def manual_consumer_button(usage_code: int) -> hidpp20.Button:
     )
 
 
+def manual_mouse_button(code: int) -> hidpp20.Button:
+    """Build the onboard-profile Button entry for a mouse-click assignment
+    chosen from the list (Left/Right/Middle Click, Back, Forward, ...).
+
+    A third distinct wire shape: SEND / BUTTON, a 2-byte code from
+    special_keys.MOUSE_BUTTONS with no modifiers byte, same as
+    manual_consumer_button()'s shape but a different code space.
+    """
+    return hidpp20.Button(
+        behavior=int(hidpp20.ButtonBehavior.SEND),
+        type=int(hidpp20.ButtonMappingType.BUTTON),
+        value=code,
+    )
+
+
 # Standalone modifier keys, in the order the picker should list them (Ctrl,
 # then Shift, then Alt, then the Windows/Meta key -- left before right within
 # each pair). USB_HID_KEYCODES spells the Windows key two different ways
@@ -397,23 +442,29 @@ def _sort_group(item: tuple[str, int]) -> tuple[int, object]:
 def available_keys() -> list[tuple[str, int, str]]:
     """(display name, code, kind) triples the manual picker can offer.
 
-    ``kind`` is ``"key"`` for a keyboard usage code -- build its Button with
-    manual_button() -- or ``"consumer"`` for a Consumer-Control usage code
-    -- build its Button with manual_consumer_button() instead, since it's a
-    different wire shape (see that function's docstring). The two are never
-    the same code space, so a caller can't mix them up by accident.
+    ``kind`` is ``"mouse"`` for a mouse-click code -- build its Button with
+    manual_mouse_button() --, ``"key"`` for a keyboard usage code -- build
+    its Button with manual_button() --, or ``"consumer"`` for a
+    Consumer-Control usage code -- build its Button with
+    manual_consumer_button() instead, since each is a different wire shape
+    (see each function's docstring). The three are never the same code
+    space, so a caller can't mix them up by accident.
 
-    The keyboard-key group merges Solaar's named USB_HID_KEYCODES table
-    (excluding the non-standard "MEDIA_*" block -- see
-    _LAST_STANDARD_KEYBOARD_USAGE -- and the IME/legacy/punctuation clutter
-    in _EXCLUDED_KEY_NAMES) with the top-row digit codes 3-9 and 0, which
-    that table leaves unnamed (only "1" and "2" are named upstream -- see
-    _DIGIT_HID_CODE above); everything else capture can reach (letters,
-    F-keys, numpad, navigation, ...) is already named there and needs no
-    patching in. It's grouped for readability rather than sorted
-    alphabetically (see _sort_group), then the curated Consumer-Control
-    keys are appended as their own trailing group.
+    The mouse-click group (Left/Right/Middle Click, Back, Forward) comes
+    first -- this editor is for mouse buttons, and "put Left Click back on
+    this button" is the single most important thing it needs to make easy
+    (see is_left_click() and the module docstring). Then the keyboard-key
+    group, which merges Solaar's named USB_HID_KEYCODES table (excluding
+    the non-standard "MEDIA_*" block -- see _LAST_STANDARD_KEYBOARD_USAGE --
+    and the IME/legacy/punctuation clutter in _EXCLUDED_KEY_NAMES) with the
+    top-row digit codes 3-9 and 0, which that table leaves unnamed (only "1"
+    and "2" are named upstream -- see _DIGIT_HID_CODE above); everything
+    else capture can reach (letters, F-keys, numpad, navigation, ...) is
+    already named there and needs no patching in, and is grouped for
+    readability rather than sorted alphabetically (see _sort_group). The
+    curated Consumer-Control keys trail as the last group.
     """
+    mouse = [(label, int(special_keys.MOUSE_BUTTONS[attr]), "mouse") for label, attr in _CURATED_MOUSE_BUTTONS.items()]
     combined = dict(_HID_NAME_TO_CODE)
     for _digit, _code in _DIGIT_HID_CODE.items():
         combined.setdefault(_digit, _code)
@@ -426,7 +477,7 @@ def available_keys() -> list[tuple[str, int, str]]:
     consumer = [
         (label, int(special_keys.HID_CONSUMERCODES[attr]), "consumer") for label, attr in _CURATED_CONSUMER_KEYS.items()
     ]
-    return keys + consumer
+    return mouse + keys + consumer
 
 
 def unassigned_button() -> hidpp20.Button:
@@ -464,6 +515,44 @@ def consumer_code(button: hidpp20.Button | None) -> int | None:
     return getattr(button, "value", None)
 
 
+def mouse_button_code(button: hidpp20.Button | None) -> int | None:
+    """The special_keys.MOUSE_BUTTONS code a Button holds, if it's a
+    mouse-click mapping (see manual_mouse_button()) -- the third
+    counterpart to key_and_modifiers()/consumer_code(), shared by
+    describe(), is_left_click(), and the dialog's picker.
+    """
+    behavior = getattr(button, "behavior", None) if button is not None else None
+    if behavior != int(hidpp20.ButtonBehavior.SEND):
+        return None
+    if getattr(button, "type", None) != int(hidpp20.ButtonMappingType.BUTTON):
+        return None
+    return getattr(button, "value", None)
+
+
+def is_left_click(button: hidpp20.Button | None) -> bool:
+    """Whether a Button is specifically a Left Click mouse-button mapping.
+
+    Used by the dialog to warn before a change would leave no button
+    anywhere sending Left Click -- there's no protocol rule that any
+    particular button slot has to be Left Click, so the only reliable check
+    is scanning actual assignments rather than trusting a slot index.
+    """
+    return mouse_button_code(button) == _LEFT_CLICK_CODE
+
+
+def identify_probe_codes(count: int) -> list[int]:
+    """Up to ``count`` HID keyboard usage codes (F13..F24) to temporarily
+    assign for "Identify Buttons" mode.
+
+    Picked because they're extremely unlikely to already be bound to
+    anything meaningful and are easy to tell apart from each other and from
+    a mouse's usual output -- capture() can resolve any keypress they
+    produce back to a plain HID code via the same table as everywhere else.
+    """
+    codes = [_HID_NAME_TO_CODE[name] for name in (f"F{n}" for n in range(13, 25)) if name in _HID_NAME_TO_CODE]
+    return codes[: max(0, count)]
+
+
 def describe(button: hidpp20.Button | None) -> str:
     """Human-readable summary of a button's current assignment, for its row label."""
     behavior = getattr(button, "behavior", None) if button is not None else None
@@ -483,6 +572,14 @@ def describe(button: hidpp20.Button | None) -> str:
         if usage_code in special_keys.HID_CONSUMERCODES:
             return str(special_keys.HID_CONSUMERCODES[usage_code])
         return str(usage_code)
-    # Mouse buttons and device functions are out of scope for this editor
-    # (v1) -- show that something is set without offering to edit it.
+    mouse_code = mouse_button_code(button)
+    if mouse_code is not None:
+        if mouse_code in _MOUSE_CODE_TO_LABEL:
+            return _MOUSE_CODE_TO_LABEL[mouse_code]
+        if mouse_code in special_keys.MOUSE_BUTTONS:
+            return str(special_keys.MOUSE_BUTTONS[mouse_code])
+        return str(mouse_code)
+    # Device functions (DPI cycle, profile switch, G-Shift, ...) and macros
+    # are out of scope for this editor (v1) -- show that something is set
+    # without offering to edit it.
     return _("(set via CLI -- not a plain key mapping)")
