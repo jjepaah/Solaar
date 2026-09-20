@@ -282,9 +282,9 @@ class OnboardButtonsDialog:
 
         info = Gtk.Label(
             label=_(
-                "Click “Capture key”, then press the key you want that button to send. "
-                "Mouse-button, media-key, and device-function assignments (DPI cycle, profile switch, "
-                "G-Shift, ...) aren’t editable here — use ‘solaar profiles’ on the command line for those."
+                "Click “Capture key” and press the key you want that button to send, or "
+                "“Choose from list” to pick one by name — useful for a key your keyboard "
+                "can’t physically send, like a numpad digit. Click “Clear” to unassign a button."
             )
         )
         info.set_line_wrap(True)

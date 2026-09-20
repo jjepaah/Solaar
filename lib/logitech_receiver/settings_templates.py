@@ -611,17 +611,17 @@ class OnboardProfileButtons(settings.Settings):
 
     v1 scope: this Setting can represent and round-trip any Button the
     device reports (mouse buttons, functions, macros included), but the
-    bundled GUI editor (``solaar.ui.onboard_buttons``) only offers capturing
-    a keyboard key -- see that package's docstring for why. Editing the
-    other behavior types still requires the CLI.
+    bundled GUI editor (``solaar.ui.onboard_buttons``) only offers assigning
+    a keyboard key or a curated Consumer-Control key -- see that package's
+    docstring for why. Editing the other behavior types still requires the
+    CLI.
     """
 
     name = "onboard_profile_buttons"
     label = _("Onboard Profile Buttons")
     description = _(
-        "Assign a keyboard key to a button on the active onboard profile.\n"
-        "Mouse-button, consumer-key, and device-function assignments are not editable here; "
-        "use 'solaar profiles' on the command line for those."
+        "Assign a keyboard key or a Consumer-Control key (browser back/forward, volume, "
+        "media controls, ...) to a button on the active onboard profile."
     )
     feature = _F.ONBOARD_PROFILES
     persist = False  # authoritative state lives in the device's onboard flash, not Solaar's config
