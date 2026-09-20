@@ -39,11 +39,13 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk  # NOQA: E402
+from gi.repository import GLib  # NOQA: E402
 from gi.repository import Gtk  # NOQA: E402
 
 from solaar.i18n import _  # NOQA: E402
 
 from . import keymap  # NOQA: E402
+from .evdev_listener import ProbeListener  # NOQA: E402
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +255,7 @@ class OnboardButtonsDialog:
         self._identifying = False
         self._identify_reverse: dict[int, int] = {}
         self._pre_identify_value: dict | None = None
+        self._probe_listener: ProbeListener | None = None
 
     def _on_delete(self, _w, _e) -> bool:
         if self._identifying:
@@ -265,6 +268,9 @@ class OnboardButtonsDialog:
         return True
 
     def _destroy(self) -> None:
+        if self._probe_listener is not None:
+            self._probe_listener.stop()
+            self._probe_listener = None
         if self._window is not None:
             self._window.destroy()
         self._window = None
@@ -525,17 +531,45 @@ class OnboardButtonsDialog:
         if not probe_map:
             return
         self._pre_identify_value = dict(value)
+        # Kept as a fallback: still resolved from an ordinary GTK
+        # key-press-event in _on_key_press() below, in case a press does
+        # reach this window normally. The raw evdev path started next is
+        # what actually solves the problem this exists to solve -- see
+        # keymap's module docstring and evdev_listener's -- since a press
+        # a desktop shortcut intercepts never reaches here as a
+        # key-press-event at all.
         self._identify_reverse = {code: index for index, code in zip(indices, codes)}
         self._identifying = True
         for row in self._rows.values():
             row.set_actions_sensitive(False)
         if self._identify_button is not None:
             self._identify_button.set_label(_("Stop Identifying"))
+
+        evdev_codes = keymap.identify_probe_evdev_codes(len(indices))
+        code_to_index = dict(zip(indices, evdev_codes))
+        listener = ProbeListener(code_to_index, on_match=self._on_probe_match)
+        raw_input_active = listener.start()
+        self._probe_listener = listener if raw_input_active else None
+
         skipped = len(indices) - len(probe_map)
-        message = _(
-            "Press each button on your mouse -- I’ll show you which one it is here. "
-            "Keep this window focused. Press Escape or click “Stop Identifying” when done."
-        )
+        if raw_input_active:
+            message = _(
+                "Press each button on your mouse -- I’ll show you which one it is here, even if "
+                "it opens something else on your system. Press Escape or click “Stop Identifying” "
+                "when done."
+            )
+        else:
+            # Raw-input reading isn't available (python-evdev missing, or no
+            # permission to read the input devices) -- fall back to plain
+            # key-press-event capture, which a desktop keyboard shortcut can
+            # intercept before it reaches this window.
+            message = _(
+                "Press each button on your mouse -- I’ll show you which one it is here. Keep this "
+                "window focused. If a button opens something else on your system instead of "
+                "showing up here, your desktop has a keyboard shortcut bound to it that's "
+                "intercepting the press -- try a different button, or free up that shortcut. "
+                "Press Escape or click “Stop Identifying” when done."
+            )
         if skipped > 0:
             message += " " + _("Only the first {count} buttons could be identified at once.").format(count=len(probe_map))
         if self._capture_overlay is not None:
@@ -545,11 +579,25 @@ class OnboardButtonsDialog:
 
         _write_async(self._setting, probe_map, self._sbox)
 
+    def _on_probe_match(self, index: int) -> None:
+        # Called from the evdev_listener background thread -- GTK widgets
+        # may only be touched from the main thread, so marshal back via
+        # GLib.idle_add rather than updating the overlay directly here.
+        GLib.idle_add(self._show_probe_match, index)
+
+    def _show_probe_match(self, index: int) -> bool:
+        if self._identifying and self._capture_overlay is not None:
+            self._capture_overlay.set_text(_("That was Button {index}!").format(index=index + 1))
+        return GLib.SOURCE_REMOVE
+
     def _stop_identify(self) -> None:
         if not self._identifying:
             return
         self._identifying = False
         self._identify_reverse = {}
+        if self._probe_listener is not None:
+            self._probe_listener.stop()
+            self._probe_listener = None
         for row in self._rows.values():
             row.set_actions_sensitive(True)
         if self._identify_button is not None:

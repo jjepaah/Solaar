@@ -98,3 +98,22 @@ def test_identify_probe_codes_caps_at_twelve_f_keys_f13_through_f24():
 
     assert keymap.identify_probe_codes(0) == []
     assert len(keymap.identify_probe_codes(100)) == 12  # F13..F24, no more available
+
+
+def test_identify_probe_evdev_codes_matches_the_hid_codes_one_for_one():
+    # evdev_listener reads raw kernel input events, which use Linux's own
+    # KEY_* numbering (input-event-codes.h) rather than the USB HID usage
+    # codes identify_probe_codes() returns for building the probe Buttons --
+    # this is the translation table bridging the two, and it must stay in
+    # lockstep (same F-key, same position) with identify_probe_codes() since
+    # the dialog zips both against the same list of button indices.
+    hid_codes = keymap.identify_probe_codes(12)
+    evdev_codes = keymap.identify_probe_evdev_codes(12)
+
+    assert len(evdev_codes) == len(hid_codes) == 12
+    # Real Linux evdev KEY_F13..KEY_F24 constants (183..194), not just "12
+    # distinct numbers" -- a fixed, well-known part of the kernel's uapi.
+    assert evdev_codes == list(range(183, 195))
+
+    assert keymap.identify_probe_evdev_codes(0) == []
+    assert len(keymap.identify_probe_evdev_codes(100)) == 12

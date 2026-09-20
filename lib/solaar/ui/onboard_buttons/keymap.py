@@ -64,6 +64,25 @@ which the dialog uses to warn before a change would leave no button at all
 sending Left Click, since every onboard-profile button slot can hold any
 assignment (there's no protocol rule that slot 0/1/2 has to stay
 left/right/middle -- that's just each device's factory default).
+
+``identify_probe_codes()`` (and its evdev counterpart,
+``identify_probe_evdev_codes()``) hands out F13-F24 usage codes for
+"Identify Buttons" mode, which temporarily assigns each button a distinct
+one of these and reports back which button a press corresponds to. F13-F24
+were picked for being extremely unlikely to already mean something on
+their own -- but "unlikely" isn't "never": some desktop environments do let
+people bind global shortcuts to keys in that range, and a global shortcut
+grabs the key before it ever reaches a focused application window as an
+ordinary GTK key-press-event, indistinguishable (from here) from the key
+just not being pressed at all. That's a real failure mode, seen on at
+least one real system, not a hypothetical -- which is why the dialog
+reads raw kernel input events via ``evdev_listener`` when available rather
+than relying solely on ``capture()`` fielding a key-press-event: a
+compositor consuming an event for its own global shortcut doesn't stop
+another reader of the same input device from also seeing it, so the raw
+path works even where the key-press-event path silently doesn't. The
+key-press-event path stays in the dialog as a fallback for when evdev
+isn't usable (not installed, or the input device nodes aren't readable).
 """
 
 from __future__ import annotations
@@ -551,6 +570,37 @@ def identify_probe_codes(count: int) -> list[int]:
     """
     codes = [_HID_NAME_TO_CODE[name] for name in (f"F{n}" for n in range(13, 25)) if name in _HID_NAME_TO_CODE]
     return codes[: max(0, count)]
+
+
+# USB HID usage code -> Linux evdev KEY_* code (linux/input-event-codes.h
+# numbering) for the F13-F24 probe keys, used by evdev_listener's raw-input
+# "Identify Buttons" path. These two numberings are unrelated to each other
+# (HID usage 0x68 vs. evdev code 183 for the same physical key, F13), so a
+# translation table is unavoidable -- built by hand here rather than pulled
+# from evdev.ecodes at call time, so this module (and identify_probe_codes())
+# stays usable even where python-evdev isn't installed.
+_HID_TO_EVDEV_KEYCODE: dict[int, int] = {
+    0x68: 183,  # F13
+    0x69: 184,  # F14
+    0x6A: 185,  # F15
+    0x6B: 186,  # F16
+    0x6C: 187,  # F17
+    0x6D: 188,  # F18
+    0x6E: 189,  # F19
+    0x6F: 190,  # F20
+    0x70: 191,  # F21
+    0x71: 192,  # F22
+    0x72: 193,  # F23
+    0x73: 194,  # F24
+}
+
+
+def identify_probe_evdev_codes(count: int) -> list[int]:
+    """Like identify_probe_codes(), but returning the Linux evdev KEY_* codes
+    for the same physical keys (F13..F24), for evdev_listener's raw-input
+    reader rather than a GTK key-press-event handler.
+    """
+    return [_HID_TO_EVDEV_KEYCODE[code] for code in identify_probe_codes(count)]
 
 
 def describe(button: hidpp20.Button | None) -> str:
