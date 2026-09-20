@@ -309,7 +309,14 @@ class OnboardButtonsDialog:
     def _reload(self) -> None:
         if self._setting is None or self._listbox is None:
             return
-        value = self._setting._value if self._setting._value else self._setting.read(cached=False)
+        # Go through read(cached=True) rather than checking self._setting.
+        # _value directly: the setting itself now knows whether its cached
+        # value still matches the active onboard profile (someone may have
+        # switched profile in the onboard_profiles dropdown since this
+        # dialog was last opened) and re-reads from the device when it
+        # doesn't, instead of this dialog silently keeping stale buttons
+        # from whichever profile was active on the previous open.
+        value = self._setting.read(cached=True)
         for child in list(self._listbox.get_children()):
             self._listbox.remove(child)
         self._rows = {}

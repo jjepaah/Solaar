@@ -124,3 +124,47 @@ def test_write_key_value_patches_only_the_target_button_and_writes_back():
     assert profile.buttons[1] == "NEW-RIGHT"
     assert profile.buttons[0] == "left"  # untouched
     assert setting._value[1] == "NEW-RIGHT"
+
+
+def test_read_cached_does_not_refetch_when_the_active_sector_is_unchanged():
+    # Regression guard for the fix below: a cached read must still avoid
+    # hitting the device when nothing has actually changed.
+    profile = _make_profile(sector=1, buttons=["left", "right"])
+    profiles = _make_profiles(profile)
+    setting = _make_onboard_profile_buttons(active_sector_value=1)
+
+    import unittest.mock as mock
+
+    with mock.patch("logitech_receiver.hidpp20.OnboardProfiles.from_device", return_value=profiles) as from_device:
+        first = setting.read(cached=True)
+        second = setting.read(cached=True)
+
+    assert first is second
+    from_device.assert_called_once()
+
+
+def test_read_refreshes_when_the_active_profile_changes_underneath_it():
+    # The GUI editor's bug this guards against: switching the active
+    # profile in the onboard_profiles dropdown left this setting's cached
+    # _value (and the "Edit button mapping" dialog built from it) showing
+    # whichever profile used to be active, because a plain "do we already
+    # have a value" cache check has no way to notice the active sector
+    # moved out from under it.
+    profile_a = _make_profile(sector=1, buttons=["A1", "A2"])
+    profile_b = _make_profile(sector=2, buttons=["B1", "B2"])
+    profiles = _make_profiles(profile_a, profile_b)
+    setting = _make_onboard_profile_buttons(active_sector_value=1)
+
+    import unittest.mock as mock
+
+    with mock.patch("logitech_receiver.hidpp20.OnboardProfiles.from_device", return_value=profiles):
+        first = setting.read(cached=True)
+        assert first == {0: "A1", 1: "A2"}
+
+        # Someone switches the active profile in the onboard_profiles
+        # dropdown -- simulated the same way _active_sector() observes it,
+        # by updating that setting's cached _value.
+        setting._device.settings[0]._value = 2
+        second = setting.read(cached=True)
+
+    assert second == {0: "B1", 1: "B2"}

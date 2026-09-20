@@ -680,7 +680,15 @@ class OnboardProfileButtons(settings.Settings):
 
     def read(self, cached=True):
         self._pre_read(cached)
-        if cached and self._value is not None:
+        active_sector = self._active_sector()
+        # A plain "do we already have a value" check isn't enough here: the
+        # active profile can change out from under this setting (someone
+        # switches profile in the onboard_profiles dropdown), and _value
+        # would still be truthy -- just for the sector that used to be
+        # active. Re-read whenever the active sector has moved since the
+        # value we're holding was read, even if the caller asked for a
+        # cached value.
+        if cached and self._value is not None and getattr(self, "_loaded_sector", None) == active_sector:
             return self._value
         if not self._device.online:
             return None
@@ -691,6 +699,7 @@ class OnboardProfileButtons(settings.Settings):
         if profile is None:
             return None
         self._profiles = profiles
+        self._loaded_sector = active_sector
         self._value = {i: button for i, button in enumerate(profile.buttons)}
         return self._value
 
@@ -710,6 +719,7 @@ class OnboardProfileButtons(settings.Settings):
             profile.buttons[int(index)] = button
         profiles.write(self._device)
         self._profiles = profiles
+        self._loaded_sector = self._active_sector()
         return mapping
 
     def write_key_value(self, key, value, save=True):
